@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <title>Конструктор этикетки Supplement Facts</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   :root{
     --ink:#0c0c0c;
@@ -113,6 +115,7 @@
     margin-top:10px;
   }
   .btn-primary:hover{background:#262626;}
+  .btn-primary:disabled{background:#7a7a7a;cursor:wait;}
   .btn-secondary{
     background:#fff;color:var(--ink);border:1px solid var(--line);
     width:100%;margin-top:8px;
@@ -140,15 +143,6 @@
     border:2.4px solid #000;
     padding:14px 16px 16px;
     font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-    page-break-inside: avoid;
-    break-inside: avoid;
-  }
-  /* Force black bars / backgrounds to print even if the browser's
-     "background graphics" print option is switched off */
-  .label, .label *{
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-    color-adjust: exact !important;
   }
   .label-title{
     font-weight:900;
@@ -214,6 +208,13 @@
     text-align:center;
     line-height:1.5;
   }
+  .status-msg{
+    font-size:0.78rem;
+    text-align:center;
+    min-height:16px;
+    color:var(--muted);
+  }
+  .status-msg.error{color:var(--danger);}
 </style>
 </head>
 <body>
@@ -279,7 +280,7 @@
             </select>
           </div>
           <div class="dv-hint" style="flex:1;min-width:200px;">
-            FDA: минимальная высота строчной буквы «o» — 1/16 дюйма. Перед печатью проверьте масштаб 1:1.
+            FDA: минимальная высота строчной буквы «o» — 1/16 дюйма. Ширина этикетки в PDF сохраняется в реальном размере (дюймы), без масштабирования под страницу.
           </div>
         </div>
       </div>
@@ -288,7 +289,8 @@
         <div class="label" id="label"></div>
       </div>
 
-      <button class="btn btn-primary" id="printBtn">🖨 Печать / Сохранить как PDF</button>
+      <button class="btn btn-primary" id="downloadBtn">⬇️ Скачать PDF</button>
+      <div class="status-msg" id="statusMsg"></div>
 
       <div class="fda-note">
         Это конструктор макета, а не юридическая консультация. Перед производством проверьте расчёт %DV, формулировки и финальный размер шрифта у специалиста по регуляторике.
@@ -311,6 +313,7 @@
 
   const rowsContainer = document.getElementById('rowsContainer');
   const labelEl = document.getElementById('label');
+  const statusMsg = document.getElementById('statusMsg');
 
   function fmtAmount(amount, unit){
     if(amount === "" || amount === null || amount === undefined || isNaN(amount)) return "";
@@ -321,7 +324,7 @@
 
   function renderRows(){
     rowsContainer.innerHTML = "";
-    state.rows.forEach((row, idx) => {
+    state.rows.forEach((row) => {
       const card = document.createElement('div');
       card.className = 'row-card';
 
@@ -444,22 +447,69 @@
     document.getElementById(id).addEventListener('input', renderLabel);
   });
 
-  document.getElementById('printBtn').addEventListener('click', () => {
-    const pageFormat = document.getElementById('pageFormat').value; // 'a4' | 'letter'
-    const printWin = window.open('', '_blank');
-    printWin.document.write(`
-      <html><head><title>Supplement Facts</title>
-      <style>
-        @page{ size: ${pageFormat}; margin: 12mm; }
-        html,body{margin:0;padding:0;}
-        body{display:flex;justify-content:center;align-items:flex-start;}
-        .label{ page-break-inside: avoid; break-inside: avoid; }
-        ${document.querySelector('style').innerHTML}
-      </style>
-      </head><body>${labelEl.outerHTML}</body></html>
-    `);
-    printWin.document.close();
-    printWin.onload = () => { printWin.focus(); printWin.print(); };
+  // ---------- PDF DOWNLOAD (client-side, no window.open) ----------
+  // Renders the label into a canvas and drops it into a jsPDF document
+  // at its true physical size (based on the width-in-inches field),
+  // then triggers a normal browser download. This avoids window.open()/
+  // document.write(), which get blocked or stripped of styles inside
+  // sandboxed iframe environments (that's what caused the broken,
+  // unstyled print output before).
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  downloadBtn.addEventListener('click', async () => {
+    if (typeof html2canvas === 'undefined' || typeof window.jspdf === 'undefined') {
+      statusMsg.textContent = 'Библиотеки PDF не загрузились (нет сети?). Обновите страницу и попробуйте снова.';
+      statusMsg.classList.add('error');
+      return;
+    }
+
+    downloadBtn.disabled = true;
+    const originalText = downloadBtn.textContent;
+    downloadBtn.textContent = 'Готовим PDF…';
+    statusMsg.textContent = '';
+    statusMsg.classList.remove('error');
+
+    try {
+      const widthIn = parseFloat(document.getElementById('widthIn').value) || 2.6;
+
+      // Render at high resolution for crisp print quality
+      const canvas = await html2canvas(labelEl, {
+        scale: 4,
+        backgroundColor: '#ffffff',
+        useCORS: true
+      });
+      const imgData = canvas.toDataURL('image/png');
+
+      const pageFormat = document.getElementById('pageFormat').value; // 'a4' | 'letter'
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ unit: 'mm', format: pageFormat === 'a4' ? 'a4' : 'letter' });
+
+      const pageWidthMm = doc.internal.pageSize.getWidth();
+      const marginMm = 12;
+
+      // Keep the label at its TRUE physical size (widthIn inches),
+      // not scaled to fill the page — this matters for FDA minimum
+      // font-height compliance.
+      const imgWidthMm = widthIn * 25.4;
+      const imgHeightMm = imgWidthMm * (canvas.height / canvas.width);
+
+      if (imgWidthMm > pageWidthMm - marginMm * 2) {
+        statusMsg.textContent = 'Внимание: ширина этикетки больше печатной области страницы — уменьшите ширину или проверьте поля при печати.';
+        statusMsg.classList.add('error');
+      }
+
+      const x = Math.max(marginMm, (pageWidthMm - imgWidthMm) / 2);
+      const y = marginMm;
+
+      doc.addImage(imgData, 'PNG', x, y, imgWidthMm, imgHeightMm);
+      doc.save('supplement-facts-label.pdf');
+    } catch (err) {
+      statusMsg.textContent = 'Не удалось создать PDF: ' + err.message;
+      statusMsg.classList.add('error');
+    } finally {
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = originalText;
+    }
   });
 
   renderRows();
